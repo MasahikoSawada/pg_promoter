@@ -1,0 +1,11 @@
+pg_promoter
+===========
+
+pg_promoter is simplified clustring module based on bgworker.
+
+- How to install pg_promoter
+
+$ mv pg_promoter postgresql/contrib/
+$ cd postgresql/contrib
+$ make
+# make install
