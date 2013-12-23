@@ -4,8 +4,17 @@ pg_promoter
 pg_promoter is simplified clustring module based on bgworker.
 
 - How to install pg_promoter
+Note that pg_promoter works fine only slave server side.
 
 $ mv pg_promoter postgresql/contrib/
 $ cd postgresql/contrib
 $ make
 # make install
+
+- How to use pg_promoter
+
+$ vi postgresql.conf
+shared_preload_libraries = 'pg_promoter'
+pg_promoter.keppalive = 5
+pg_promoter.primary_conninfo = 'host=192.168.100.100 port=5432'
+
