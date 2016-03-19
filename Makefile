@@ -1,4 +1,4 @@
-# contrib/worker_spi/Makefile
+# pg_promoter/Makefile
 
 MODULE_big = pg_promoter
 OBJS = pg_promoter.o
