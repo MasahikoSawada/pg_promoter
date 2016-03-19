@@ -2,7 +2,8 @@
  *
  * pg_promoter.c
  *
- * Created by Masahiko Sawada
+ * Simple clustering extension module for PostgreSQL.
+ *
  * -------------------------------------------------------------------------
  */
 
@@ -18,32 +19,32 @@
 #include "storage/shmem.h"
 
 /* these headers are used by this particular worker's code */
-#include "access/xact.h"
-#include "utils/snapmgr.h"
 #include "tcop/utility.h"
 #include "libpq-int.h"
 
+#define	HEARTBEAT_SQL "select 1;"
+
 PG_MODULE_MAGIC;
 
-typedef long pgpid_t;
-
 void		_PG_init(void);
-void		pg_promoter_main(Datum);
-static void do_promote(void);
-static pgpid_t get_pgpid(void);
+void		PromoterMain(Datum);
+static void doPromote(void);
+static bool heartbeatPrimaryServer(void);
 
 /* flags set by signal handlers */
 static volatile sig_atomic_t got_sighup = false;
 static volatile sig_atomic_t got_sigterm = false;
 
 /* GUC variables */
-static int	pg_promoter_keepalives;
-static char	*pg_promoter_primary_conninfo = NULL;
+static int	promoter_keepalives;
+static char	*promoter_primary_conninfo = NULL;
+static char *trigger_file = NULL;
 
-static char promote_file[MAXPGPATH];
-static char pid_file[MAXPGPATH];
-static char *pg_data = NULL;
+/* Variables for connections */
 static char conninfo[MAXPGPATH];
+
+/* Variables for cluster management */
+static int retry_count;
 
 typedef struct worktable
 {
@@ -83,40 +84,72 @@ pg_promoter_sighup(SIGNAL_ARGS)
 }
 
 /*
- * Initialize several parameter for a worker process
+ * Initialize several parameters for a worker process
  */
 static void
-initialize_pg_promoter()
+initialize()
 {
 	PGconn *con;
 
-	pg_data = getenv("PGDATA");
+	/* Set up variables */
+	snprintf(conninfo, MAXPGPATH, "%s", promoter_primary_conninfo);
+	retry_count = 0;
 
-	snprintf(conninfo,MAXPGPATH,"%s",pg_promoter_primary_conninfo);
-
-	snprintf(pid_file, 1000, "%s/postmaster.pid", pg_data);
-
-	/* Connection confirm */	
+	/* Connection confirm */
 	if(!(con = PQconnectdb(conninfo)))
 	{
-		elog(WARNING,"Connection confirm failed");
-		elog(WARNING,"Could not establish connection to primary server : %s", conninfo);
+		ereport(LOG,
+				(errmsg("could not establish connection to primary server : %s", conninfo)));
 		proc_exit(1);
 	}
+
+	PQfinish(con);
 	return;
 }
 
 /*
- * Main
+ * headbeatPrimaryServer()
+ *
+ * This fucntion does heatbeating to primary server. If could not establish connection
+ * to primary server, or primary server didn't reaction, return false.
  */
-void
-pg_promoter_main(Datum main_arg)
+bool
+heartbeatPrimaryServer(void)
 {
+	PGconn		*con;
+	PGresult 	*res;
 
-	PGconn *con;
-	PGresult *res;
+	/* Try to connect to primary server */
+	if ((con = PQconnectdb(conninfo)) == NULL)
+	{
+		ereport(LOG,
+				(errmsg("Could not establish conenction to primary server at %d time(s)",
+						(retry_count + 1))));
+		PQfinish(con);
+		return false;
+	}
 
-	initialize_pg_promoter();
+	res = PQexec(con, HEARTBEAT_SQL);
+
+	if (PQresultStatus(res) != PGRES_TUPLES_OK)
+	{
+		ereport(LOG,
+				(errmsg("could not get tuple from primary server at %d time(s)",
+						(retry_count + 1))));
+		PQfinish(con);
+		return false;
+	}
+
+	PQfinish(con);
+	/* Primary server is alive now */
+	return true;
+}
+
+/* Main routine */
+void
+PromoterMain(Datum main_arg)
+{
+	initialize();
 		
 	/* Establish signal handlers before unblocking signals. */
 	pqsignal(SIGHUP, pg_promoter_sighup);
@@ -130,7 +163,7 @@ pg_promoter_main(Datum main_arg)
 	 */
 	while (!got_sigterm)
 	{
-		int			rc;
+		int		rc;
 
 		/*
 		 * Background workers mustn't call usleep() or any direct equivalent:
@@ -140,107 +173,74 @@ pg_promoter_main(Datum main_arg)
 		 */
 		rc = WaitLatch(&MyProc->procLatch,
 					   WL_LATCH_SET | WL_TIMEOUT | WL_POSTMASTER_DEATH,
-					   pg_promoter_keepalives * 1000L);
+					   promoter_keepalives * 1000L);
 		ResetLatch(&MyProc->procLatch);
 
 		/* emergency bailout if postmaster has died */
 		if (rc & WL_POSTMASTER_DEATH)
 			proc_exit(1);
 
-		/*
-		 * In case of a SIGHUP, just reload the configuration.
-		 */
+		/* If got SIGHUP, Just reload the configuration file */
 		if (got_sighup)
 		{
 			got_sighup = false;
 			ProcessConfigFile(PGC_SIGHUP);
 		}
 
-		/*  Try to connect primary server */
-		if (!(con = PQconnectdb(conninfo)))
-		{
-			/* If could not establish connection to primary server, do promote */
-			elog(WARNING, "Could not establish connection");
-			elog(WARNING, "The primary server might crashed");
-			do_promote();
-			break;
-		}
+		/* If heartbeat is failed, do promote */
+		if (!heartbeatPrimaryServer())
+			retry_count++;
 
-		/* Polling */
-		res = PQexec(con, "select 1");
-
-		if (PQntuples(res) != 1)
+		/* If could not connect to primary server, do promote */
+		/* TODO : Must specify retry count via configuration parameter */
+		if (retry_count >= 5)
 		{
-			/* If could not get tuple, do promote */
-			elog(WARNING,"Could not get tuple");
-			elog(WARNING, "The primary server might crashed");
-			do_promote();
-			break;
+			doPromote();
+			proc_exit(0);
 		}
-		PQfinish(con);
 	}
+
 	proc_exit(1);
 }
 
-static pgpid_t
-get_pgpid(void)
-{
-	FILE *pidf;
-	long pid;
-
-	pidf = fopen(pid_file, "r");
-
-	if (pidf == NULL)
-	{
-		/* no pid file */
-		elog(WARNING,"Could not open pid file : %s", pid_file);
-		proc_exit(1);
-	}
-
-	if (fscanf(pidf, "%ld", &pid) != 1)
-	{
-		elog(WARNING,"Could not scan pid from pid file : %s", pid_file);
-		proc_exit(1);
-	}
-
-	fclose(pidf);
-
-	return (pgpid_t) pid;
-}
-
+/*
+ * doPromote()
+ *
+ * Promote standby server using ordinally way which is used by
+ * pg_ctl client tool. Put trigger file into $PGDATA, and send
+ * SIGUSR1 signal to standby server.
+ */
 static void
-do_promote(void)
+doPromote(void)
 {
-	pgpid_t pid;
-	FILE *prmfile;
+	char trigger_filepath[MAXPGPATH];
+	FILE *fp;
 
-	elog(LOG,"Do promote by pg_promoter");
+    snprintf(trigger_filepath, 1000, "%s/%s", DataDir, trigger_file);
 
-	pid = get_pgpid();
-
-	if (pid <= 0)
+	if ((fp = fopen(trigger_filepath, "w")) == NULL)
 	{
-		elog(WARNING, "Could not find pid file");
+		ereport(LOG,
+				(errmsg("could not create promote file: \"%s\"", trigger_filepath)));
 		proc_exit(1);
 	}
 
-    snprintf(promote_file, 1000, "%s/promote", pg_data);
+	if (fclose(fp))
+	{
+		ereport(LOG,
+				(errmsg("could not close promote file: \"%s\"", trigger_filepath)));
+		proc_exit(1);
+	}
 
-	prmfile = fopen(promote_file, "w");
-	if (prmfile == NULL)
+	ereport(LOG,
+			(errmsg("promote standby server to primary server")));
+
+	/* Do promotion */
+	if (kill(PostmasterPid, SIGUSR1) != 0)
 	{
-		elog(WARNING,"Could not create promote file");
-		proc_exit(1);
-	}
-	if (fclose(prmfile))
-	{
-		elog(WARNING,"Could not close promote fils");
-		proc_exit(1);
-	}
-	
-	if (kill((pid_t) pid, SIGUSR1) != 0)
-	{
-		elog(WARNING," Failed to send SIGUSR1 signal to postmaster process : %d", (uint)pid);
+		ereport(LOG,
+				(errmsg("failed to send SIGUSR1 signal to postmaster process : %d",
+						PostmasterPid)));
 		proc_exit(1);
 	}
 }
@@ -256,11 +256,14 @@ _PG_init(void)
 {
 	BackgroundWorker worker;
 
+	if (!process_shared_preload_libraries_in_progress)
+		return;
+
 	/* get the configuration */
 	DefineCustomIntVariable("pg_promoter.keepalives",
 							"Specific time between polling to primary server",
 							NULL,
-							&pg_promoter_keepalives,
+							&promoter_keepalives,
 							3,
 							1,
 							INT_MAX,
@@ -270,14 +273,22 @@ _PG_init(void)
 							NULL,
 							NULL);
 
-	if (!process_shared_preload_libraries_in_progress)
-		return;
-
 	DefineCustomStringVariable("pg_promoter.primary_conninfo",
 							"Connection information for primary server",
 							NULL,
-							&pg_promoter_primary_conninfo,
-							"aaaa",
+							&promoter_primary_conninfo,
+							"",
+							PGC_POSTMASTER,
+							0,
+							NULL,
+							NULL,
+							NULL);
+
+	DefineCustomStringVariable("pg_promoter.trigger_file",
+							"Trigger file for promotion to primary server",
+							NULL,
+							&trigger_file,
+							"promote",
 							PGC_POSTMASTER,
 							0,
 							NULL,
@@ -289,7 +300,7 @@ _PG_init(void)
 		BGWORKER_BACKEND_DATABASE_CONNECTION;
 	worker.bgw_start_time = BgWorkerStart_ConsistentState;
 	worker.bgw_restart_time = BGW_NEVER_RESTART;
-	worker.bgw_main = pg_promoter_main;
+	worker.bgw_main = PromoterMain;
 	worker.bgw_notify_pid = 0;
 	/*
 	 * Now fill in worker-specific data, and do the actual registrations.
