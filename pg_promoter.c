@@ -264,7 +264,7 @@ _PG_init(void)
 							"Specific time between polling to primary server",
 							NULL,
 							&promoter_keepalives_time,
-							3,
+							5,
 							1,
 							INT_MAX,
 							PGC_SIGHUP,
