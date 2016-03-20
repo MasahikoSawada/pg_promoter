@@ -5,9 +5,9 @@ pg_promoter is simplified clustring module for PostgreSQL.
 
 # Overview
 pg_promoter module works fine only on standby server side.
-pg_promoter continues to do ping to primary server every
+pg_promoter continues polling to primary server every
 pg_promoter.keepalive_time second using simple query 'SELECT 1'.
-If pg_promoter failes to ping pg_promoter.keepalive_count time(s),
+If pg_promoter failes to poll pg_promoter.keepalive_count time(s),
 pg_promoter will promote standby server to master server, and then
 exit its process.
 That is, fail over time can be calculated with this formula.
@@ -20,11 +20,11 @@ Specifies a connection string to be used for pg_promoter to connect to master se
 This value must be specified in postgresql.conf, and must be same as primary_conninfo in recovery.conf.
 
 - pg_promoter.keepalive_time (sec)
-Specifies how long interval pg_promoter continues to ping.
+Specifies how long interval pg_promoter continues polling.
 Deafult value is 5 secound.
 
 - pg_promoter.keepalive_count
-Specifies how many times pg_promoter try to ping to master server in ordre to promote
+Specifies how many times pg_promoter try polling to master server in ordre to promote
 standby server.
 Default value is 1 times.
 

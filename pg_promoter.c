@@ -28,8 +28,13 @@ PG_MODULE_MAGIC;
 
 void		_PG_init(void);
 void		PromoterMain(Datum);
+static void setupPromoter(void);
 static void doPromote(void);
 static bool heartbeatPrimaryServer(void);
+
+/* Function for signal handler */
+static void pg_promoter_sigterm(SIGNAL_ARGS);
+static void pg_promoter_sighup(SIGNAL_ARGS);
 
 /* flags set by signal handlers */
 static volatile sig_atomic_t got_sighup = false;
@@ -85,10 +90,10 @@ pg_promoter_sighup(SIGNAL_ARGS)
 }
 
 /*
- * Initialize several parameters for a worker process
+ * Set up several parameters for a worker process
  */
 static void
-initialize()
+setupPromoter(void)
 {
 	PGconn *con;
 
@@ -114,7 +119,7 @@ initialize()
  * This fucntion does heatbeating to primary server. If could not establish connection
  * to primary server, or primary server didn't reaction, return false.
  */
-bool
+static bool
 heartbeatPrimaryServer(void)
 {
 	PGconn		*con;
@@ -134,6 +139,7 @@ heartbeatPrimaryServer(void)
 
 	if (PQresultStatus(res) != PGRES_TUPLES_OK)
 	{
+		/* Failed to ping to master server, report the number of retrying */
 		ereport(LOG,
 				(errmsg("could not get tuple from primary server at %d time(s)",
 						(retry_count + 1))));
@@ -141,18 +147,20 @@ heartbeatPrimaryServer(void)
 		return false;
 	}
 
-	PQfinish(con);
 	/* Primary server is alive now */
+	PQfinish(con);
 	return true;
 }
 
-/* Main routine */
+/*
+ * Main routine of pg_promoter.
+ */
 void
 PromoterMain(Datum main_arg)
 {
-	initialize();
+	setupPromoter();
 		
-	/* Establish signal handlers before unblocking signals. */
+	/* Establish signal handlers before unblocking signals */
 	pqsignal(SIGHUP, pg_promoter_sighup);
 	pqsignal(SIGTERM, pg_promoter_sigterm);
 	
@@ -177,22 +185,27 @@ PromoterMain(Datum main_arg)
 					   promoter_keepalives_time * 1000L);
 		ResetLatch(&MyProc->procLatch);
 
-		/* emergency bailout if postmaster has died */
+		/* Emergency bailout if postmaster has died */
 		if (rc & WL_POSTMASTER_DEATH)
 			proc_exit(1);
 
-		/* If got SIGHUP, Just reload the configuration file */
+		/* If got SIGHUP, reload the configuration file */
 		if (got_sighup)
 		{
 			got_sighup = false;
 			ProcessConfigFile(PGC_SIGHUP);
 		}
 
-		/* If heartbeat is failed, do promote */
+		/*
+		 * Do heartbeat connection to master server. If heartbeat is failed,
+		 * increment retry_count..
+		 */
 		if (!heartbeatPrimaryServer())
 			retry_count++;
 
-		/* If could not connect to primary server, do promote */
+		/* If retry_count is reached to promoter_keepalives_count,
+		 * do promote the standby server to master server, and exit.
+		 */
 		if (retry_count >= promoter_keepalives_count)
 		{
 			doPromote();
@@ -235,7 +248,7 @@ doPromote(void)
 	ereport(LOG,
 			(errmsg("promote standby server to primary server")));
 
-	/* Do promotion */
+	/* Do promote */
 	if (kill(PostmasterPid, SIGUSR1) != 0)
 	{
 		ereport(LOG,
@@ -274,7 +287,7 @@ _PG_init(void)
 							NULL);
 
 	DefineCustomIntVariable("pg_promoter.keepalives_count",
-							"Specific time between polling to primary server",
+							"Specific retry count until promoting standby server",
 							NULL,
 							&promoter_keepalives_count,
 							1,
