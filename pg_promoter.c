@@ -36,7 +36,8 @@ static volatile sig_atomic_t got_sighup = false;
 static volatile sig_atomic_t got_sigterm = false;
 
 /* GUC variables */
-static int	promoter_keepalives;
+static int	promoter_keepalives_time;
+static int	promoter_keepalives_count;
 static char	*promoter_primary_conninfo = NULL;
 static char *trigger_file = NULL;
 
@@ -173,7 +174,7 @@ PromoterMain(Datum main_arg)
 		 */
 		rc = WaitLatch(&MyProc->procLatch,
 					   WL_LATCH_SET | WL_TIMEOUT | WL_POSTMASTER_DEATH,
-					   promoter_keepalives * 1000L);
+					   promoter_keepalives_time * 1000L);
 		ResetLatch(&MyProc->procLatch);
 
 		/* emergency bailout if postmaster has died */
@@ -192,8 +193,7 @@ PromoterMain(Datum main_arg)
 			retry_count++;
 
 		/* If could not connect to primary server, do promote */
-		/* TODO : Must specify retry count via configuration parameter */
-		if (retry_count >= 5)
+		if (retry_count >= promoter_keepalives_count)
 		{
 			doPromote();
 			proc_exit(0);
@@ -260,11 +260,24 @@ _PG_init(void)
 		return;
 
 	/* get the configuration */
-	DefineCustomIntVariable("pg_promoter.keepalives",
+	DefineCustomIntVariable("pg_promoter.keepalives_time",
 							"Specific time between polling to primary server",
 							NULL,
-							&promoter_keepalives,
+							&promoter_keepalives_time,
 							3,
+							1,
+							INT_MAX,
+							PGC_SIGHUP,
+							0,
+							NULL,
+							NULL,
+							NULL);
+
+	DefineCustomIntVariable("pg_promoter.keepalives_count",
+							"Specific time between polling to primary server",
+							NULL,
+							&promoter_keepalives_count,
+							1,
 							1,
 							INT_MAX,
 							PGC_SIGHUP,
