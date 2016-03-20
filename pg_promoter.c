@@ -44,7 +44,6 @@ static volatile sig_atomic_t got_sigterm = false;
 static int	promoter_keepalives_time;
 static int	promoter_keepalives_count;
 static char	*promoter_primary_conninfo = NULL;
-static char *trigger_file = NULL;
 
 /* Variables for connections */
 static char conninfo[MAXPGPATH];
@@ -229,7 +228,7 @@ doPromote(void)
 	char trigger_filepath[MAXPGPATH];
 	FILE *fp;
 
-    snprintf(trigger_filepath, 1000, "%s/%s", DataDir, trigger_file);
+    snprintf(trigger_filepath, 1000, "%s/promote", DataDir);
 
 	if ((fp = fopen(trigger_filepath, "w")) == NULL)
 	{
@@ -304,17 +303,6 @@ _PG_init(void)
 							NULL,
 							&promoter_primary_conninfo,
 							"",
-							PGC_POSTMASTER,
-							0,
-							NULL,
-							NULL,
-							NULL);
-
-	DefineCustomStringVariable("pg_promoter.trigger_file",
-							"Trigger file for promotion to primary server",
-							NULL,
-							&trigger_file,
-							"promote",
 							PGC_POSTMASTER,
 							0,
 							NULL,

@@ -4,12 +4,12 @@ pg_promoter
 pg_promoter is simplified clustring module for PostgreSQL.
 
 # Overview
-pg_promoter module works fine only on standby server side.
-pg_promoter continues polling to primary server every
-pg_promoter.keepalive_time second using simple query 'SELECT 1'.
-If pg_promoter failes to poll pg_promoter.keepalive_count time(s),
-pg_promoter will promote standby server to master server, and then
-exit its process.
+pg_promoter module is available only on standby server side.
+pg_promoter polls to primary server every pg_promoter.keepalive_time
+second using simple query 'SELECT 1'.
+If pg_promoter failed to poll at pg_promoter.keepalive_count time(s),
+pg_promoter will promote the standby server to master server, and then
+exit itself.
 That is, fail over time can be calculated with this formula.
 
 F/O time = pg_promoter.keepalives_time * pg_promoter.keepalives_count
@@ -28,18 +28,13 @@ Specifies how many times pg_promoter try polling to master server in ordre to pr
 standby server.
 Default value is 1 times.
 
-- pg_promoter.trigger_file
-Specifies a tigger file to be used for pg_promoter to promote standby server.
-This value must be same as trigger_file in postgresql.conf.
-Default value is 'promote'.
-
 # How to install pg_promoter
 
 ```
 $ cd pg_promoter
 $ make USE_PGXS=1
 $ su
-# make install
+# make USE_PGXS=1 install
 ```
 
 # How to set up pg_promoter
