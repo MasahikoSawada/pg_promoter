@@ -1,3 +1,5 @@
+Upward compatibility of pg_promoter is [pg_keeper](https://github.com/MasahikoSawada/pg_promoter).
+
 pg_promoter
 ===========
 
